@@ -63,9 +63,9 @@ class ReliableCoordinator(serviceA: Service[InfoA, AResult], serviceB: Service[I
             val infoC = (bResult.id, bResult.content.toString)
             beginTaskC(infoC)
 
-          case _: FinishedTaskC =>
-            log.info("Tasks A, B, and C have already been completed, stopping now")
-            context stop self
+          case FinishedTaskC(CResult(id, _)) =>
+            log.info("Tasks A, B, and C have already been completed")
+            beginCompletion(id)
         }
     }
   }
@@ -73,7 +73,7 @@ class ReliableCoordinator(serviceA: Service[InfoA, AResult], serviceB: Service[I
   override def receiveCommand: Receive = {
     case StartBigTask(info) =>
       // capture the requestor's ActorRef so we can reply to them
-      replyTo = Some(sender())
+      replyTo = Option(sender())
       beginTaskA((info.time, info.content, info.id))
   }
 
@@ -141,6 +141,21 @@ class ReliableCoordinator(serviceA: Service[InfoA, AResult], serviceB: Service[I
   // use the command to capture the sender
   def recoverySenderCapture: Receive = {
     case _: StartBigTask =>
-      replyTo = Some(sender())
+      replyTo = Option(sender())
+  }
+
+  // In the recovery case where you have run to completion
+  def beginCompletion(id: Int): Unit = {
+    def recoveryReplyAndStop: Receive = {
+      case _: StartBigTask =>
+        replyTo = Option(sender())
+        replyTo.foreach { requestor =>
+          log.info("sending message back to the requestor")
+          requestor ! TaskComplete(id)
+        }
+
+        context stop self
+    }
+    context become recoveryReplyAndStop
   }
 }
