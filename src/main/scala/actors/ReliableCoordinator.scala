@@ -1,7 +1,7 @@
 package actors
 
 import akka.pattern.pipe
-import akka.actor.{ActorLogging, Props}
+import akka.actor.{ActorLogging, ActorRef, Props}
 import akka.persistence.{PersistentActor, RecoveryCompleted}
 import models.{AResult, BResult, CResult, InitialInformation}
 import services.Service
@@ -35,6 +35,8 @@ class ReliableCoordinator(serviceA: Service[InfoA, AResult], serviceB: Service[I
   implicit val ec: ExecutionContext = context.dispatcher
 
   override def persistenceId = s"big-task-${self.path.name}"
+
+  var replyTo: Option[ActorRef] = None
 
   override def receiveRecover: Receive = {
     // minimize scope of mutability
@@ -70,6 +72,8 @@ class ReliableCoordinator(serviceA: Service[InfoA, AResult], serviceB: Service[I
 
   override def receiveCommand: Receive = {
     case StartBigTask(info) =>
+      // capture the requestor's ActorRef so we can reply to them
+      replyTo = Some(sender())
       beginTaskA((info.time, info.content, info.id))
   }
 
@@ -83,7 +87,7 @@ class ReliableCoordinator(serviceA: Service[InfoA, AResult], serviceB: Service[I
   def beginTaskA(infoA: InfoA): Unit = {
     val result = retryInfinitely(infoA, serviceA)
     result.map(FinishedTaskA) pipeTo self
-    context become awaitTaskA
+    context become awaitTaskA.orElse(recoverySenderCapture)
   }
 
   def awaitTaskA: Receive = {
@@ -99,7 +103,7 @@ class ReliableCoordinator(serviceA: Service[InfoA, AResult], serviceB: Service[I
   def beginTaskB(infoB: InfoB): Unit = {
     val result = retryInfinitely(infoB, serviceB)
     result.map(FinishedTaskB) pipeTo self
-    context become awaitTaskB
+    context become awaitTaskB.orElse(recoverySenderCapture)
   }
 
   def awaitTaskB: Receive = {
@@ -115,7 +119,7 @@ class ReliableCoordinator(serviceA: Service[InfoA, AResult], serviceB: Service[I
   def beginTaskC(infoC: InfoC): Unit = {
     val result = retryInfinitely(infoC, serviceC)
     result.map(FinishedTaskC) pipeTo self
-    context become awaitTaskC
+    context become awaitTaskC.orElse(recoverySenderCapture)
   }
 
   def awaitTaskC: Receive = {
@@ -123,7 +127,20 @@ class ReliableCoordinator(serviceA: Service[InfoA, AResult], serviceB: Service[I
       persist(event) { _ =>
         log.info("Task C has finished")
         log.info(s"$persistenceId has completed successfully!")
+
+        replyTo.foreach { requestor =>
+          log.info("sending message back to the requestor")
+          requestor ! TaskComplete(event.result.id)
+        }
+
         context stop self
       }
+  }
+
+  // In the recovery case, you will receive the initial command again
+  // use the command to capture the sender
+  def recoverySenderCapture: Receive = {
+    case _: StartBigTask =>
+      replyTo = Some(sender())
   }
 }
