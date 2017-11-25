@@ -1,4 +1,4 @@
-name := "reliable-coordinator-v2"
+name := "reliable-coordinator-example"
 
 version := "0.1"
 
